@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 *.safetensors filter=lfs diff=lfs merge=lfs -text
 *.jinja filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text
@@ -7,3 +8,13 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.tflited filter=lfs diff=lfs merge=lfs -text
 *.tflite filter=lfs diff=lfs merge=lfs -text
+=======
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.tflite filter=lfs diff=lfs merge=lfs -text
+*.json filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.jinja filter=lfs diff=lfs merge=lfs -text
+*.safetensors filter=lfs diff=lfs merge=lfs -text
+>>>>>>> 3c3af48 (Adding gitignore before anything larger happens)
