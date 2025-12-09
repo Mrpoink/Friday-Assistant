@@ -17,6 +17,7 @@ Thumbs.db
 .vscode/
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 # Model checkpoints and weights (large files)
 checkpoint-*/
@@ -45,6 +46,8 @@ trainer_state.json
 runs/
 
 >>>>>>> 3c3af48 (Adding gitignore before anything larger happens)
+=======
+>>>>>>> 22503f1 (updating git info)
 # Data exports that can be regenerated
 Converted_CSVs/
 
@@ -54,6 +57,7 @@ Converted_CSVs/
 # Hugging Face cache (optional)
 ~/.cache/huggingface/
 <<<<<<< HEAD
+<<<<<<< HEAD
 TrainingData/
 =======
 Converted_CSVs/
@@ -61,4 +65,7 @@ TrainingData/
 Friday-Models-OLD/
 Fridayv1.4-1.5B-Coder-Instruct-Thinking-SA/
 >>>>>>> 3c3af48 (Adding gitignore before anything larger happens)
+=======
+TrainingData/
+>>>>>>> 22503f1 (updating git info)
 EFS$
