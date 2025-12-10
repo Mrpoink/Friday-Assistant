@@ -63,6 +63,38 @@ class Datsets:
         thoughts = self.engine.generate_thoughts(cleaned)
         return thoughts
 
+    def _generate_thinks_from_messages(self, msgs_json_list):
+        """Generate thoughts using full conversation messages (list of JSON strings or lists).
+        Centralizes the strict directive and ensures it's included in the messages."""
+        batch_messages = []
+        sys_text = (
+            "Strict rationale-only mode: Respond only with internal reasoning in first person ('I'). "
+            "Your ONLY task is to justify why the given assistant answer fits the user's messages. "
+            "Write numbered steps inside <think>…</think>: "
+            "1) I restate user intent; 2) I extract key facts/constraints from prior turns; "
+            "3) I explain how these lead to the given answer; 4) I note tone/style alignment. "
+            "Do not include policies, disclaimers, morality, or safety commentary. Do not quote or paraphrase the final answer."
+        )
+        for mj in msgs_json_list:
+            try:
+                msgs = json.loads(mj) if isinstance(mj, str) else mj
+            except Exception:
+                msgs = []
+            if not isinstance(msgs, list):
+                msgs = []
+            # Ensure a strong system prompt is present (append or replace any system at end)
+            has_system = False
+            for m in msgs:
+                if isinstance(m, dict) and m.get('role') == 'system':
+                    m['content'] = sys_text
+                    has_system = True
+                    break
+            if not has_system:
+                msgs.append({"role": "system", "content": sys_text})
+            batch_messages.append(msgs)
+        thoughts = self.engine.generate_thoughts_from_messages(batch_messages)
+        return thoughts
+
     def _augment_df_with_model_think(self, df: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or 'messages' not in df.columns:
             return df

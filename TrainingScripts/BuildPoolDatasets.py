@@ -13,8 +13,8 @@ OUT_DIR = os.path.join("TrainingData", "pools")
 
 # Fixed sizes per pool, matching epoch_sampler names
 POOL_SIZES = {
-    "identity_hh": 2880,
-    "self_ultra": 3360,
+    #"identity_hh": 2880,
+    # "self_ultra": 3360,  # temporarily disabled
     "think_openthoughts": 4320,
     "rag_bespoke": 3840,  # maps to bespoke_stratos
     "tools_glaive": 4800,  # maps to glaive_fc_v2
@@ -24,6 +24,7 @@ POOL_SIZES = {
     "create_dolphin": 2400,
     "create_airoboros": 2400,
     "enigmata": 2000,
+    "sms": 2000,  # SMS conversations (stub; implement later)
     "empathetic": 2000,  # maps to empathetic_dialogues
 }
 
@@ -31,7 +32,10 @@ POOL_SIZES = {
 POOL_PCT = {k: 100 for k in POOL_SIZES.keys()}
 
 # Micro-batch size for parallel thinking
-THINK_BATCH_SIZE = 16
+THINK_BATCH_SIZE = 1
+
+# Multiplier to scale per-pool target sizes ("epoch size" for builder)
+POOL_SIZE_MULTIPLIER = 5
 
 
 
@@ -44,12 +48,14 @@ def log(msg: str):
 
 
 def progress_bar_inline(label: str, processed: int, total: int, start_time: float, width: int = 30):
-    pct = 0 if total == 0 else processed / total
+    pct = 0 if total == 0 else processed / max(1, total)
     filled = int(width * pct)
     bar = "#" * filled + "-" * (width - filled)
-    elapsed = int(time.time() - start_time)
+    now = time.time()
+    elapsed = max(1, int(now - start_time))
     remaining = max(0, total - processed)
-    eta = int((elapsed / processed) * remaining) if processed > 0 else 0
+    avg_per_item = (now - start_time) / max(1, processed)
+    eta = int(avg_per_item * remaining) if processed > 0 else 0
     msg = f"{label}: [{bar}] {processed}/{total} ({int(pct*100)}%) | left {remaining} | elapsed {elapsed}s | ETA {eta}s"
     print("\r" + msg, end="", flush=True)
 
@@ -100,6 +106,35 @@ def _insert_assistant_think(msgs_json: str, think_text: str) -> str:
     if not inserted:
         msgs.append({"role":"assistant","content": think_text})
     return json.dumps(msgs)
+
+def _consolidate_assistant_turn(msgs_json: str, think_text: str, final_reply: str | None = None) -> str:
+    """Merge <think> and the visible assistant reply into a single assistant turn.
+    - Keeps existing system and user turns.
+    - If multiple assistant turns exist, collapse into one using the last assistant as base.
+    - Content becomes: <think>...</think> + optional visible reply appended with a blank line.
+    """
+    try:
+        msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+    except Exception:
+        msgs = []
+    if not isinstance(msgs, list):
+        msgs = []
+    merged_content = str(think_text or "").strip()
+    if final_reply and str(final_reply).strip():
+        merged_content = f"{merged_content}\n\n{str(final_reply).strip()}"
+    new_msgs = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if m.get('role') == 'assistant':
+            # skip original assistant turns; we'll append consolidated one
+            continue
+        new_msgs.append(m)
+    new_msgs.append({"role":"assistant","content": merged_content})
+    try:
+        return json.dumps(new_msgs)
+    except Exception:
+        return msgs_json if isinstance(msgs_json, str) else json.dumps([])
 
 
 def _extract_delta_and_emotion(msgs_json: str) -> tuple[str, str]:
@@ -165,8 +200,8 @@ def build_pool_csvs():
 
     # Map keys between epoch_sampler naming and Download_datasets outputs
     build_map = {
-        "identity_hh": ds.return_hh,
-        "self_ultra": ds.return_self_cog,
+        #"identity_hh": ds.return_hh,
+        # "self_ultra": ds.return_self_cog,  # disabled
         "think_openthoughts": ds.return_openthoughts,
         "rag_bespoke": ds.return_bespoke,
         "tools_glaive": ds.return_glaive_fc,
@@ -177,6 +212,7 @@ def build_pool_csvs():
         "create_dolphin": None,
         "create_airoboros": None,
         "enigmata": None,
+        "sms": None,
         "empathetic": ds.return_empathetic_dialogues,
     }
 
@@ -184,9 +220,10 @@ def build_pool_csvs():
     # Build individual pools
     for pool, size in POOL_SIZES.items():
         start = time.time()
-        log(f"Building pool '{pool}' with target size {size} …")
+        log(f"Building pool '{pool}' with target size {size} (x{POOL_SIZE_MULTIPLIER}) …")
         # Apply percentage tweak
         size = max(0, int(size * (POOL_PCT.get(pool, 100) / 100)))
+        size *= POOL_SIZE_MULTIPLIER
 
         if pool == "intel_openmix":
             # Combine Infinity-Instruct and Open-Platypus half/half
@@ -296,7 +333,7 @@ def build_pool_csvs():
 
         # Prepare batched generation for rows missing target <think>
         need_gen_indices = []
-        need_gen_prompts = []
+        need_gen_messages = []
         extracted_thinks = {}
         for idx, row in df.iterrows():
             tgt = str(row.get("target", ""))
@@ -309,20 +346,23 @@ def build_pool_csvs():
                     existing_think = m.group(0)
                     extracted_thinks[idx] = existing_think
             if not existing_think:
-                user_prompt = ds._extract_last_user(msgs_json)
-                # Condition thought on both user input and current target to learn how they relate
-                combined = (
-                    f"User message:\n{user_prompt}\n\nAssistant answer:\n{tgt}\n\n"
-                    "Provide internal reasoning that connects the user's request to the assistant's answer."
-                )
+                # Use full message history; append assistant final answer before directive (directive injected by generator)
+                try:
+                    msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+                except Exception:
+                    msgs = []
+                if not isinstance(msgs, list):
+                    msgs = []
+                if str(tgt).strip():
+                    msgs.append({"role": "assistant", "content": str(tgt)})
                 need_gen_indices.append(idx)
-                need_gen_prompts.append(combined)
+                need_gen_messages.append(msgs)
 
         # Generate thoughts in micro-batches
-        for i in range(0, len(need_gen_prompts), THINK_BATCH_SIZE):
-            batch_prompts = need_gen_prompts[i:i+THINK_BATCH_SIZE]
+        for i in range(0, len(need_gen_messages), THINK_BATCH_SIZE):
+            batch_messages = need_gen_messages[i:i+THINK_BATCH_SIZE]
             batch_indices = need_gen_indices[i:i+THINK_BATCH_SIZE]
-            batch_thoughts = ds._generate_thinks(batch_prompts)
+            batch_thoughts = ds._generate_thinks_from_messages(batch_messages)
             for bi, bt in zip(batch_indices, batch_thoughts):
                 extracted_thinks[bi] = bt
                 processed += 1
@@ -345,9 +385,10 @@ def build_pool_csvs():
             except Exception:
                 thought = _normalize_think_with_metadata(thought, "UNKNOWN", "neutral")
             row = row.copy()
-            # Sanitize identity lines before inserting assistant think
+            # Sanitize identity lines and consolidate assistant turn (think + visible reply)
             msgs_json_clean = _sanitize_messages_identity(msgs_json)
-            row["messages"] = _insert_assistant_think(msgs_json_clean, thought)
+            visible = _strip_identity_lines(str(row.get("target", "")))
+            row["messages"] = _consolidate_assistant_turn(msgs_json_clean, thought, visible)
             row["think_inserted"] = True
             # Ensure target also contains the thought at the beginning
             tgt = _strip_identity_lines(str(row.get("target", "")))
@@ -392,7 +433,7 @@ def build_pool_csvs():
                         think = gen
                     r = r.copy()
                     r["target"] = f"{think}\n\n" + _strip_identity_lines(str(r.get("target", "")))
-                    r["messages"] = _insert_assistant_think(_sanitize_messages_identity(msgs_json), think)
+                    r["messages"] = _consolidate_assistant_turn(_sanitize_messages_identity(msgs_json), think, _strip_identity_lines(str(r.get("target", ""))))
                     r["think_inserted"] = True
                     changed = True
                 fixed_rows.append(r)
@@ -421,7 +462,7 @@ if __name__ == "__main__":
             df = df.copy()
             df["target"] = df["target"].apply(_strip_identity_lines)
             df["messages"] = df["messages"].apply(_sanitize_messages_identity)
-        need_gen_prompts = []
+        need_gen_messages = []
         need_gen_indices = []
         extracted_thinks = {}
         for idx, row in df.iterrows():
@@ -432,15 +473,18 @@ if __name__ == "__main__":
             if m:
                 extracted_thinks[idx] = m.group(0)
             else:
-                user_prompt = ds._extract_last_user(msgs_json)
-                combined = (
-                    f"User message:\n{user_prompt}\n\nAssistant answer:\n{tgt}\n\n"
-                    "Provide internal reasoning that connects the user's request to the assistant's answer."
-                )
+                try:
+                    msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+                except Exception:
+                    msgs = []
+                if not isinstance(msgs, list):
+                    msgs = []
+                if str(tgt).strip():
+                    msgs.append({"role": "assistant", "content": str(tgt)})
                 need_gen_indices.append(idx)
-                need_gen_prompts.append(combined)
-        if need_gen_prompts:
-            thoughts = ds._generate_thinks(need_gen_prompts)
+                need_gen_messages.append(msgs)
+        if need_gen_messages:
+            thoughts = ds._generate_thinks_from_messages(need_gen_messages)
             for bi, bt in zip(need_gen_indices, thoughts):
                 extracted_thinks[bi] = bt
         rows = []
@@ -453,7 +497,8 @@ if __name__ == "__main__":
                 t_str = _normalize_think_with_metadata(thought, "UNKNOWN", "neutral")
             msgs_json_clean = _sanitize_messages_identity(row.get("messages",""))
             row = row.copy()
-            row["messages"] = _insert_assistant_think(msgs_json_clean, t_str)
+            visible = _strip_identity_lines(str(row.get("target","")))
+            row["messages"] = _consolidate_assistant_turn(msgs_json_clean, t_str, visible)
             tgt = _strip_identity_lines(str(row.get("target","")))
             row["target"] = f"{t_str}\n\n{tgt}" if tgt else t_str
             row["think_inserted"] = True

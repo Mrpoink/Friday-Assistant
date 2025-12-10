@@ -8,7 +8,7 @@ import csv
 import ollama
 from typing import List, Dict, Tuple
 from huggingface_hub import login
-login(token="HUGGINGFACE_API_TOKEN_PLACEHOLDER")
+login(token="huggingface_token_placeholder")
 
 import pandas as pd
 from datasets import load_dataset
@@ -750,7 +750,7 @@ def make_argparser():
     p.add_argument("--ollama_model", type=str, default="deepseek-r1:7b", help="Ollama model to use for generating thoughts")
     p.add_argument("--ollama_timeout", type=int, default=60, help="Timeout for Ollama generation in seconds")
     p.add_argument("--ollama_sms", action="store_true", help="Also augment static SMS anchors with Ollama-generated thoughts (off by default)")
-    p.add_argument("--epochs", type=int, default=2, help="Number of epochs to generate")
+    p.add_argument("--epochs", type=int, default=5, help="Number of epochs to generate")
     # Pool-level percentages (0-100)
     for k in [
         "identity_hh","self_ultra","think_openthoughts","rag_bespoke","tools_glaive",

@@ -127,9 +127,16 @@ class ThinkEngine:
     def __init__(self, model_name: str = "deepseek-r1:7b"):
         # Use Ollama as the backing inference engine.
         # Ensure the model is available in Ollama via `ollama pull`.
+        import os
         import ollama
         self._ollama = ollama
-        self.model_name = model_name
+        # Allow overriding model and VRAM-affecting options via env
+        self.model_name = os.getenv("FRIDAY_OLLAMA_MODEL", model_name)
+        self.num_ctx = int(os.getenv("FRIDAY_OLLAMA_NUM_CTX", "1024"))
+        self.default_num_predict = int(os.getenv("FRIDAY_OLLAMA_NUM_PREDICT", "256"))
+        self.temperature = float(os.getenv("FRIDAY_OLLAMA_TEMPERATURE", "0.7"))
+        # keep_alive=0 forces unload after each call to free VRAM
+        self.keep_alive = os.getenv("FRIDAY_OLLAMA_KEEP_ALIVE", "0")
 
     def _chat(self, prompt: str, max_new_tokens: int = 512) -> str:
         system_text = (
@@ -138,6 +145,8 @@ class ThinkEngine:
             "Wrap all reasoning in <think> and </think> tags."
         )
         try:
+            # Respect env-tuned limits for lower VRAM usage
+            predict = min(int(max_new_tokens or 0) or self.default_num_predict, self.default_num_predict)
             data = self._ollama.chat(
                 model=self.model_name,
                 messages=[
@@ -145,9 +154,11 @@ class ThinkEngine:
                     {"role": "user", "content": prompt or ""},
                 ],
                 options={
-                    "num_predict": max_new_tokens,
-                    "temperature": 0.7,
+                    "num_predict": predict,
+                    "num_ctx": self.num_ctx,
+                    "temperature": self.temperature,
                 },
+                keep_alive=self.keep_alive,
             )
             content = data.get("message", {}).get("content", "")
             return str(content or "").strip()
@@ -164,6 +175,32 @@ class ThinkEngine:
         results = []
         for p in prompts:
             results.append(self._chat(p or "", max_new_tokens=max_new_tokens))
+        return results
+
+    def generate_thought_from_messages(self, messages, max_new_tokens: int = 512) -> str:
+        """Generate a thought using full chat history messages (list of dicts)."""
+        try:
+            predict = min(int(max_new_tokens or 0) or self.default_num_predict, self.default_num_predict)
+            data = self._ollama.chat(
+                model=self.model_name,
+                messages=messages,
+                options={
+                    "num_predict": predict,
+                    "num_ctx": self.num_ctx,
+                    "temperature": self.temperature,
+                },
+                keep_alive=self.keep_alive,
+            )
+            return str(data.get("message", {}).get("content", "") or "").strip()
+        except Exception as e:
+            return f"<think>Internal reasoning unavailable: {e}</think>"
+
+    def generate_thoughts_from_messages(self, batch_messages, max_new_tokens: int = 512):
+        if not isinstance(batch_messages, (list, tuple)):
+            raise TypeError("batch_messages must be a list of message lists")
+        results = []
+        for msgs in batch_messages:
+            results.append(self.generate_thought_from_messages(msgs, max_new_tokens=max_new_tokens))
         return results
 
 _THINK_ENGINE = None

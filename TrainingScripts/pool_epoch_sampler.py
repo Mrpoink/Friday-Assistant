@@ -185,7 +185,7 @@ def build_pool_epochs(args):
 
 def make_argparser():
     p = argparse.ArgumentParser(description="Per-pool epoch sampler (incremental appends)")
-    p.add_argument("--epochs", type=int, default=2, help="Number of epochs to generate")
+    p.add_argument("--epochs", type=int, default=5, help="Number of epochs to generate")
     p.add_argument("--ollama_thoughts", action="store_true", help="Augment datasets with Ollama-generated <think> thoughts per pool")
     p.add_argument("--ollama_sms", action="store_true", help="Also augment static SMS anchors with Ollama-generated thoughts (off by default)")
     # Pool-level percentages (0-100) reused from epoch sampler
