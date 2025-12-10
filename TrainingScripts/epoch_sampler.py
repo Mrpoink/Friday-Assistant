@@ -8,7 +8,7 @@ import csv
 import ollama
 from typing import List, Dict, Tuple
 from huggingface_hub import login
-login(token="HUGGINGFACE_TOKEN_PLACEHOLDER")
+login(token="HUGGINGFACE_API_TOKEN_PLACEHOLDER")
 
 import pandas as pd
 from datasets import load_dataset
@@ -46,7 +46,7 @@ def prepend_system(msgs_json: str) -> str:
 
 
 # Runtime-tunable defaults for Ollama augmentation
-_OLLAMA_MODEL = "erwan2/DeepSeek-R1-Distill-Qwen-1.5B"
+_OLLAMA_MODEL = "deepseek-r1:7b"
 _OLLAMA_TIMEOUT = 60
 
 ollama_amount = 0
@@ -747,7 +747,7 @@ def build_epochs(args):
 def make_argparser():
     p = argparse.ArgumentParser(description="Dynamic epoch sampler (pool-level percentages)")
     p.add_argument("--ollama_thoughts", action="store_true", help="Augment datasets with Ollama-generated <think> thoughts for intelligence, half of tools, and SMS")
-    p.add_argument("--ollama_model", type=str, default="erwan2/DeepSeek-R1-Distill-Qwen-1.5B", help="Ollama model to use for generating thoughts")
+    p.add_argument("--ollama_model", type=str, default="deepseek-r1:7b", help="Ollama model to use for generating thoughts")
     p.add_argument("--ollama_timeout", type=int, default=60, help="Timeout for Ollama generation in seconds")
     p.add_argument("--ollama_sms", action="store_true", help="Also augment static SMS anchors with Ollama-generated thoughts (off by default)")
     p.add_argument("--epochs", type=int, default=2, help="Number of epochs to generate")

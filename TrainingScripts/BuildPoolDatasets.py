@@ -31,7 +31,7 @@ POOL_SIZES = {
 POOL_PCT = {k: 100 for k in POOL_SIZES.keys()}
 
 # Micro-batch size for parallel thinking
-THINK_BATCH_SIZE = 75
+THINK_BATCH_SIZE = 16
 
 
 
@@ -52,6 +52,105 @@ def progress_bar_inline(label: str, processed: int, total: int, start_time: floa
     eta = int((elapsed / processed) * remaining) if processed > 0 else 0
     msg = f"{label}: [{bar}] {processed}/{total} ({int(pct*100)}%) | left {remaining} | elapsed {elapsed}s | ETA {eta}s"
     print("\r" + msg, end="", flush=True)
+
+
+def _strip_identity_lines(text: str) -> str:
+    """Remove identity tag lines like `[identity] server:self local machine` from any text."""
+    try:
+        lines = str(text or "").splitlines()
+        cleaned = [ln for ln in lines if not ln.strip().lower().startswith("[identity] server:self local machine")]
+        return "\n".join(cleaned)
+    except Exception:
+        return str(text or "")
+
+
+def _sanitize_messages_identity(msgs_json: str) -> str:
+    """Remove identity tag lines from each message content in the messages JSON payload."""
+    try:
+        msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+    except Exception:
+        msgs = []
+    if not isinstance(msgs, list):
+        msgs = []
+    for m in msgs:
+        if isinstance(m, dict):
+            m["content"] = _strip_identity_lines(m.get("content", ""))
+    return json.dumps(msgs)
+
+
+def _insert_assistant_think(msgs_json: str, think_text: str) -> str:
+    """Insert an assistant message containing the think_text, avoiding duplicates."""
+    try:
+        msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+    except Exception:
+        msgs = []
+    if not isinstance(msgs, list):
+        msgs = []
+    # prevent duplicate think insertion
+    for m in msgs:
+        if m.get('role') == 'assistant' and '<think>' in str(m.get('content','')):
+            return json.dumps(msgs)
+    # insert before last assistant or append
+    inserted = False
+    for i in range(len(msgs)-1, -1, -1):
+        if msgs[i].get('role') == 'assistant':
+            msgs.insert(i, {"role":"assistant","content": think_text})
+            inserted = True
+            break
+    if not inserted:
+        msgs.append({"role":"assistant","content": think_text})
+    return json.dumps(msgs)
+
+
+def _extract_delta_and_emotion(msgs_json: str) -> tuple[str, str]:
+    """Parse DELTA:(...) and first <emotion> token from the last user message content."""
+    delta = None
+    emotion = None
+    try:
+        msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
+    except Exception:
+        msgs = []
+    if isinstance(msgs, list) and msgs:
+        # find last user content
+        for i in range(len(msgs)-1, -1, -1):
+            if msgs[i].get('role') == 'user':
+                content = str(msgs[i].get('content', ''))
+                break
+        else:
+            content = ''
+        import re as _re
+        m = _re.search(r"\[DELTA:\(([^)]+)\)\]", content)
+        if m:
+            delta = m.group(1).strip()
+        # emotion like <curiosity> or <gratitude>
+        m2 = _re.search(r"<([a-zA-Z_]+)>", content)
+        if m2:
+            emotion = m2.group(1).strip()
+    # defaults
+    return (delta or "UNKNOWN", emotion or "neutral")
+
+
+def _normalize_think_with_metadata(thought_text: str, delta: str, emotion: str) -> str:
+    """Ensure a single well-formed <think>...</think> containing metadata and the original inner content.
+    - Extract inner content between first <think> and </think>. If missing, use full text as inner.
+    - Strip any stray </think> or <think> fragments from inner.
+    - Build exactly one pair: <think>[delta: ...][emotion: ...] {inner}</think>
+    """
+    import re as _re
+    t = str(thought_text or "")
+    m = _re.search(r"<think>(.*?)</think>", t, flags=_re.DOTALL | _re.IGNORECASE)
+    inner = m.group(1) if m else t
+    # Remove any residual think tags inside
+    inner = _re.sub(r"</?think>", "", inner)
+    # Trim leading artifacts like leading quotes caused by truncation
+    inner = inner.strip()
+    # Repair leading truncation artifacts like "'s ..." or "’s ..."
+    # Remove a leading possessive fragment if present: ^(['"’]s\s+)
+    inner = _re.sub(r"^(['\"’]s\s+)", "", inner)
+    # Basic capitalization fix if inner starts with lowercase alpha
+    if inner[:1].islower():
+        inner = inner[:1].upper() + inner[1:]
+    return f"<think>[delta: {delta}][emotion: {emotion}] {inner}</think>"
 
 
     def to_csv(df: pd.DataFrame, out_path: str):
@@ -179,6 +278,12 @@ def build_pool_csvs():
         else:
             df = build_map[pool](size)
 
+        # Strip identity tags in raw rows before any generation or insertion
+        if len(df) > 0:
+            df = df.copy()
+            df["target"] = df["target"].apply(_strip_identity_lines)
+            df["messages"] = df["messages"].apply(_sanitize_messages_identity)
+
         # Augment with model thoughts inline and show progress
         try:
             total = len(df)
@@ -187,27 +292,7 @@ def build_pool_csvs():
         processed = 0
         last_update = 0
         out_rows = []
-        def _insert_assistant_think(msgs_json: str, think_text: str) -> str:
-            try:
-                msgs = json.loads(msgs_json) if isinstance(msgs_json, str) else msgs_json
-            except Exception:
-                msgs = []
-            if not isinstance(msgs, list):
-                msgs = []
-            # prevent duplicate
-            for m in msgs:
-                if m.get('role') == 'assistant' and '<think>' in str(m.get('content','')):
-                    return json.dumps(msgs)
-            # insert before last assistant or append
-            inserted = False
-            for i in range(len(msgs)-1, -1, -1):
-                if msgs[i].get('role') == 'assistant':
-                    msgs.insert(i, {"role":"assistant","content": think_text})
-                    inserted = True
-                    break
-            if not inserted:
-                msgs.append({"role":"assistant","content": think_text})
-            return json.dumps(msgs)
+        # use top-level _insert_assistant_think helper
 
         # Prepare batched generation for rows missing target <think>
         need_gen_indices = []
@@ -253,16 +338,19 @@ def build_pool_csvs():
             if thought is None:
                 # fallback to existing think extracted from target or skip (shouldn't happen)
                 thought = "<think>Internal reasoning.</think>"
-            # Ensure the thought text is wrapped in <think> tags
-            t_str = str(thought or "")
-            if "<think>" not in t_str or "</think>" not in t_str:
-                t_str = f"<think>{t_str}</think>"
-            thought = t_str
+            # Normalize with metadata to avoid duplication and cutoff
+            try:
+                delta, emotion = _extract_delta_and_emotion(msgs_json)
+                thought = _normalize_think_with_metadata(thought, delta, emotion)
+            except Exception:
+                thought = _normalize_think_with_metadata(thought, "UNKNOWN", "neutral")
             row = row.copy()
-            row["messages"] = _insert_assistant_think(msgs_json, thought)
+            # Sanitize identity lines before inserting assistant think
+            msgs_json_clean = _sanitize_messages_identity(msgs_json)
+            row["messages"] = _insert_assistant_think(msgs_json_clean, thought)
             row["think_inserted"] = True
             # Ensure target also contains the thought at the beginning
-            tgt = str(row.get("target", ""))
+            tgt = _strip_identity_lines(str(row.get("target", "")))
             if tgt:
                 row["target"] = f"{thought}\n\n{tgt}"
             else:
@@ -281,8 +369,8 @@ def build_pool_csvs():
             fixed_rows = []
             import re as _re
             for _, r in audit.iterrows():
-                tgt = str(r.get("target", ""))
-                msgs_json = r.get("messages", "")
+                tgt = _strip_identity_lines(str(r.get("target", "")))
+                msgs_json = _sanitize_messages_identity(r.get("messages", ""))
                 # Extract first think block if present
                 m = _re.search(r"<think>.*?</think>", tgt, flags=_re.DOTALL | _re.IGNORECASE)
                 think = m.group(0) if m else None
@@ -303,8 +391,8 @@ def build_pool_csvs():
                             gen = f"<think>{gen.strip()}</think>"
                         think = gen
                     r = r.copy()
-                    r["target"] = f"{think}\n\n" + str(r.get("target", ""))
-                    r["messages"] = _insert_assistant_think(msgs_json, think)
+                    r["target"] = f"{think}\n\n" + _strip_identity_lines(str(r.get("target", "")))
+                    r["messages"] = _insert_assistant_think(_sanitize_messages_identity(msgs_json), think)
                     r["think_inserted"] = True
                     changed = True
                 fixed_rows.append(r)
@@ -324,6 +412,60 @@ def load_dataset_stub(*args, **kwargs):
 
 
 if __name__ == "__main__":
+    # Build a small 10-row sample first so it's available immediately
+    try:
+        print("\nBuilding 10-row sample from 'identity_hh' → _sample_identity_hh.csv …")
+        ds = Datsets()
+        df = ds.return_hh(10)
+        if len(df) > 0:
+            df = df.copy()
+            df["target"] = df["target"].apply(_strip_identity_lines)
+            df["messages"] = df["messages"].apply(_sanitize_messages_identity)
+        need_gen_prompts = []
+        need_gen_indices = []
+        extracted_thinks = {}
+        for idx, row in df.iterrows():
+            tgt = str(row.get("target",""))
+            msgs_json = row.get("messages","")
+            import re as _re
+            m = _re.search(r"<think>.*?</think>", tgt, flags=_re.DOTALL | _re.IGNORECASE)
+            if m:
+                extracted_thinks[idx] = m.group(0)
+            else:
+                user_prompt = ds._extract_last_user(msgs_json)
+                combined = (
+                    f"User message:\n{user_prompt}\n\nAssistant answer:\n{tgt}\n\n"
+                    "Provide internal reasoning that connects the user's request to the assistant's answer."
+                )
+                need_gen_indices.append(idx)
+                need_gen_prompts.append(combined)
+        if need_gen_prompts:
+            thoughts = ds._generate_thinks(need_gen_prompts)
+            for bi, bt in zip(need_gen_indices, thoughts):
+                extracted_thinks[bi] = bt
+        rows = []
+        for idx, row in df.iterrows():
+            thought = extracted_thinks.get(idx, "<think>Internal reasoning.</think>")
+            try:
+                delta, emotion = _extract_delta_and_emotion(row.get("messages",""))
+                t_str = _normalize_think_with_metadata(thought, delta, emotion)
+            except Exception:
+                t_str = _normalize_think_with_metadata(thought, "UNKNOWN", "neutral")
+            msgs_json_clean = _sanitize_messages_identity(row.get("messages",""))
+            row = row.copy()
+            row["messages"] = _insert_assistant_think(msgs_json_clean, t_str)
+            tgt = _strip_identity_lines(str(row.get("target","")))
+            row["target"] = f"{t_str}\n\n{tgt}" if tgt else t_str
+            row["think_inserted"] = True
+            rows.append(row)
+        sample_df = pd.DataFrame(rows)
+        out_path = os.path.join("TrainingData","pools","_sample_identity_hh.csv")
+        sample_df.to_csv(out_path, index=False, encoding="utf-8")
+        print(f"Wrote _sample_identity_hh.csv with {len(sample_df)} rows")
+    except Exception as e:
+        print("Sample build failed:", e)
+
+    # Build full pools
     build_pool_csvs()
     # After run, list pool CSVs and row counts
     try:

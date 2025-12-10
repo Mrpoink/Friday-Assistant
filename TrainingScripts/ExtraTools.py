@@ -124,115 +124,51 @@ class EmotionEngine:
         return f"<{label}>"
     
 class ThinkEngine:
-    def __init__(self, model_name: str = "Qwen/Qwen3-0.6B"):
+    def __init__(self, model_name: str = "deepseek-r1:7b"):
+        # Use Ollama as the backing inference engine.
+        # Ensure the model is available in Ollama via `ollama pull`.
+        import ollama
+        self._ollama = ollama
         self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        # Decoder-only models should use left padding when batching
-        try:
-            self.tokenizer.padding_side = 'left'
-        except Exception:
-            pass
-        if getattr(self.tokenizer, 'pad_token', None) is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            dtype=dtype,
-        )
-        if torch.cuda.is_available():
-            self.model = self.model.to("cuda")
-        
-    def generate_thought(self, prompt: str, max_new_tokens: int = 512) -> str:
-        # Strict instructions to force thinking
+
+    def _chat(self, prompt: str, max_new_tokens: int = 512) -> str:
         system_text = (
             "You are a reasoning engine. respond only with internal reasoning. "
             "Do not apologize. Do not say 'Here is the thinking'. "
             "Wrap all reasoning in <think> and </think> tags."
         )
-        messages = [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": prompt or ""},
-        ]
-        
-        # Apply template
-        if hasattr(self.tokenizer, "apply_chat_template"):
-            text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        else:
-            text = f"System: {system_text}\nUser: {prompt}\nAssistant: "
-            
-        inputs = self.tokenizer([text], return_tensors="pt", padding=True)
-        target_device = next(self.model.parameters()).device
-        inputs = {k: v.to(target_device) for k, v in inputs.items()}
-        
-        gen_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": True,
-            "temperature": 0.7, 
-        }
-        
-        outputs = self.model.generate(**inputs, **gen_kwargs)
-        decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Robust extraction: remove the input prompt from the output
-        # If the decoded text starts with the input text, strip it
-        # This relies on the fact that 'text' (the prompt) is usually a prefix of 'decoded'
-        # ignoring special tokens issues.
-        
-        # Simpler approach: Split by specific role markers if known, 
-        # or just try to find the last segment.
-        
-        if "assistant" in decoded.lower():
-             # Find the last occurrence of assistant
-             # Note: regex ignore case
-             parts = re.split(r"assistant\s*", decoded, flags=re.IGNORECASE)
-             m = parts[-1]
-        else:
-             # Fallback if chat template hides roles or strict format fails
-             m = decoded[len(text):] if decoded.startswith(text) else decoded
+        try:
+            data = self._ollama.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": prompt or ""},
+                ],
+                options={
+                    "num_predict": max_new_tokens,
+                    "temperature": 0.7,
+                },
+            )
+            content = data.get("message", {}).get("content", "")
+            return str(content or "").strip()
+        except Exception as e:
+            # Return a minimal think block on failure
+            return f"<think>Internal reasoning unavailable: {e}</think>"
 
-        return m.strip()
+    def generate_thought(self, prompt: str, max_new_tokens: int = 512) -> str:
+        return self._chat(prompt, max_new_tokens=max_new_tokens)
 
     def generate_thoughts(self, prompts, max_new_tokens: int = 512):
         if not isinstance(prompts, (list, tuple)):
             raise TypeError("prompts must be a list of strings")
-        system_text = (
-            "You are a reasoning engine. respond only with internal reasoning. "
-            "Do not apologize. Do not say 'Here is the thinking'. "
-            "Wrap all reasoning in <think> and </think> tags."
-        )
-        texts = []
-        for p in prompts:
-            messages = [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": p or ""},
-            ]
-            if hasattr(self.tokenizer, "apply_chat_template"):
-                t = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            else:
-                t = f"System: {system_text}\nUser: {p}\nAssistant: "
-            texts.append(t)
-        inputs = self.tokenizer(texts, return_tensors="pt", padding=True)
-        target_device = next(self.model.parameters()).device
-        inputs = {k: v.to(target_device) for k, v in inputs.items()}
-        gen_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": True, "temperature": 0.7}
-        outputs = self.model.generate(**inputs, **gen_kwargs)
         results = []
-        for i in range(outputs.size(0)):
-            decoded = self.tokenizer.decode(outputs[i], skip_special_tokens=True)
-            # Extract assistant segment if present
-            if "assistant" in decoded.lower():
-                parts = re.split(r"assistant\s*", decoded, flags=re.IGNORECASE)
-                seg = parts[-1]
-            else:
-                t = texts[i]
-                seg = decoded[len(t):] if decoded.startswith(t) else decoded
-            results.append(seg.strip())
+        for p in prompts:
+            results.append(self._chat(p or "", max_new_tokens=max_new_tokens))
         return results
 
 _THINK_ENGINE = None
 
-def get_think_engine(model_name: str = "Qwen/Qwen3-0.6B") -> ThinkEngine:
+def get_think_engine(model_name: str = "deepseek-r1:7b") -> ThinkEngine:
     global _THINK_ENGINE
     if _THINK_ENGINE is None or getattr(_THINK_ENGINE, 'model_name', None) != model_name:
         _THINK_ENGINE = ThinkEngine(model_name=model_name)
