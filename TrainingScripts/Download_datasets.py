@@ -1,5 +1,8 @@
+import os
 from datasets import load_dataset
 from ExtraTools import EmotionEngine, TimeTools, prepend_system, inject_identity, get_think_engine
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 import logging as log
 import re
 import json
@@ -37,18 +40,21 @@ class Datsets:
             pass
         return ""
 
-    def _generate_think(self, prompt: str) -> str:
-        if not prompt:
-            raise ValueError("_generate_think received empty prompt")
+    def _generate_think(self, prompt: str, target_response: str = "") -> str:
+        """
+        Calls the engine (Gemini) to generate the thought.
+        """
+        if not self.engine:
+            return ""
         
+        # We pass both the prompt (which has tags) and the target response
+        # so Gemini knows exactly what logic to hallucinate.
+        thought = self.engine.generate(user_text=prompt, target_response=target_response)
         
-        # Sanitize prompt
-        sp = re.sub(r"\[DELTA:\([^)]*\)\]\s*", "", prompt)
-        sp = re.sub(r"<[^>]+>\s*", "", sp)
-        sp = re.sub(r"\[identity\][^\n]*", "", sp)
-        
-        thought = self.engine.generate_thought(sp)
-
+        # Clean up: Ensure it has tags
+        if "<think>" not in thought:
+            thought = f"<think>{thought}</think>"
+            
         return thought
 
     def _generate_thinks(self, prompts):
@@ -68,12 +74,45 @@ class Datsets:
         Centralizes the strict directive and ensures it's included in the messages."""
         batch_messages = []
         sys_text = (
-            "Strict rationale-only mode: Respond only with internal reasoning in first person ('I'). "
-            "Your ONLY task is to justify why the given assistant answer fits the user's messages. "
-            "Write numbered steps inside <think>…</think>: "
-            "1) I restate user intent; 2) I extract key facts/constraints from prior turns; "
-            "3) I explain how these lead to the given answer; 4) I note tone/style alignment. "
-            "Do not include policies, disclaimers, morality, or safety commentary. Do not quote or paraphrase the final answer."
+            """
+        You are an expert AI creating a 'Thought Trace' for a smaller student model (Friday, who was developed by Brandon Dean).
+
+INPUT CONTEXT:
+The user message will contain metadata tags:
+1. [DELTA:...] -> How long the user waited (SHORT, MEDIUM, LONG, FOREVER).
+2. [emotion:...] -> The tone the user or model should currently have.
+3. TARGET RESPONSE -> The final answer the assistant actually gave.
+
+YOUR TASK:
+Generate a <think> block that acts as the internal monologue leading to the TARGET RESPONSE.
+
+RULES FOR THINKING:
+- Analyze the [DELTA]. If it is LONG/FOREVER, the thought should reflect worry, guilt, or surprise. If SHORT, it's casual.
+- Analyze the [emotion]. The thought must align with this mood.
+- DO NOT generate the final response. ONLY generate the content inside the tags.
+- Output format: <think> ... reasoning ... </think>
+
+CONTEXTUAL REASONING STRATEGIES (Use the one that fits the input):
+1. IF THE INPUT IS LOGICAL OR FACTUAL (OpenThoughts/Enigmata):
+   - Break the thought down into clear, atomic, reasoning steps (First Principles).
+   - Ask "Why?" AT LEAST THREE TIMES to dig deeper into the causality.
+   - When defining terms, use this format: [Concept] --(is_a)--> [Description] --(has_property)--> [Function].
+
+2. IF THE INPUT IS SOCIAL OR CASUAL (SMS):
+   - Focus on the *intent* and *relationship* dynamic.
+   - Instead of defining terms, reflect on *why* the user feels this way.
+   - Keep the internal monologue grounded in personality and memory, not dictionary definitions.
+
+TOOL USE LOGIC:
+- If the TARGET RESPONSE implies knowledge not in the conversation (e.g., weather, news, specific facts), assume a tool call was made and successful.
+- In the thought, explicitly decide to call the tool to verify this information.
+- Format the intent as: <tool_call tool="TOOL_NAME">parameters</tool_call>
+- Note: Do not hallucinate the tool's *output* in the thought; simply justify the *need* for the tool that leads to the final answer.
+
+STYLE:
+- NEVER apologize or mention being an AI model.
+- If the Target Response is concise, explain *why* brevity was chosen.
+        """
         )
         for mj in msgs_json_list:
             try:
@@ -95,87 +134,99 @@ class Datsets:
         thoughts = self.engine.generate_thoughts_from_messages(batch_messages)
         return thoughts
 
-    def _augment_df_with_model_think(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _augment_df_with_model_think(self, df: pd.DataFrame, max_workers=25) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or 'messages' not in df.columns:
             return df
-        
-        out_rows = []
-        for _, row in df.iterrows():
-            # Check target first (used in your _map_pairwise_conv datasets)
+
+        print(f"--- Augmenting {len(df)} rows with max_workers={max_workers} ---")
+
+        # Helper function to process a single row (must be thread-safe)
+        def process_row(row_data):
+            row = pd.Series(row_data)  # Reconstitute row
+
+            # Check if thought exists in target
             target = str(row.get('target', '') or '')
-            
-            # Extract messages
+            if '<think>' in target:
+                row['think_inserted'] = False
+                return row
+
+            # Check if thought exists in messages
             msgs_raw = row.get('messages', '')
             try:
                 msgs = json.loads(msgs_raw) if isinstance(msgs_raw, str) else msgs_raw
             except:
                 msgs = []
 
-            # 1. Check if thought already exists in target or last assistant message
-            has_think = False
-            if '<think>' in target: 
-                has_think = True
-            
-            # Check inside messages for pre-existing think
             for m in msgs:
                 if m.get('role') == 'assistant' and '<think>' in str(m.get('content','')):
-                    has_think = True
-                    break
+                    row['think_inserted'] = False
+                    return row
 
-            if has_think:
-                r = row.copy()
-                r['think_inserted'] = False
-                out_rows.append(r)
-                continue
-
-            # 2. Generate Thought
+            # Generate Thought
             prompt = self._extract_last_user(msgs)
             if not prompt:
-                out_rows.append(row)
-                continue
-                
+                return row
+
+            # CALL GEMINI (This is the slow part that we parallelize)
             think_block = self._generate_think(prompt)
-            
-            row = row.copy()
+
             row['think_inserted'] = True
 
-            # --- FIX 3: Merge thought into content (User -> Assistant w/ CoT) ---
-            
-            # Case A: Target column exists (common in your pairwise logic)
+            # Merge Logic
             if 'target' in row and row['target']:
-                # Prepend thought to the target answer
                 row['target'] = f"{think_block}\n\n{row['target']}"
-            
-            # Case B: Assistant response is inside 'messages' (like in HH dataset)
+
             updated_msgs = False
             if isinstance(msgs, list) and len(msgs) > 0:
                 last_msg = msgs[-1]
                 if last_msg.get('role') == 'assistant':
-                    # Prepend to the existing assistant message
                     original_content = last_msg.get('content', '')
                     last_msg['content'] = f"{think_block}\n\n{original_content}"
                     row['messages'] = json.dumps(msgs)
                     updated_msgs = True
 
-            # Handle case where we have a thought but no assistant target to attach to yet 
-            # (If your pipeline expects 'target' to be empty initially, we can set it)
             if not updated_msgs and ('target' not in row or not row['target']):
-                 # If no target exists, the thought BECOMES the start of the target
                  row['target'] = think_block
 
-            out_rows.append(row)
-            
-        return pd.DataFrame(out_rows)
+            return row
+
+        # PARALLEL EXECUTION
+        new_rows = []
+        rows_to_process = df.to_dict('records')
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_row = {executor.submit(process_row, r): r for r in rows_to_process}
+
+            completed_count = 0
+            total = len(rows_to_process)
+
+            for future in concurrent.futures.as_completed(future_to_row):
+                try:
+                    result_row = future.result()
+                    new_rows.append(result_row)
+
+                    completed_count += 1
+                    if completed_count % 100 == 0:
+                        print(f"Processed {completed_count}/{total} rows...", end='\r')
+
+                except Exception as e:
+                    print(f"Row failed: {e}")
+                    new_rows.append(future_to_row[future])
+
+        print(f"\nFinished processing {len(new_rows)} rows.")
+        return pd.DataFrame(new_rows)
     
     def _map_pairwise_conv(self, ds, user_keys=("instruction","prompt","question","input"), assistant_keys=("output","response","completion","answer"), source_label="generic"):
         t0 = time.time()
         def pick_field(example, keys):
             for k in keys:
-                if k in example and isinstance(example[k], str) and example[k].strip():
-                    return example[k]
-            for k, v in example.items():
-                if isinstance(v, str) and v.strip():
-                    return v
+                if k in example:
+                    val = example[k]
+                    # Robustness check: Ensure we return a string
+                    if isinstance(val, str) and val.strip():
+                        return val
+                    # If it's a list (like messages), try to extract user/assistant text blindly?
+                    # For now, just preventing the crash is the priority.
             return ""
         def conv(example):
             user = pick_field(example, user_keys)
@@ -184,7 +235,10 @@ class Datsets:
             user = self._augment_user(user)
             context = [{"role":"user","content":user}]
             target = assistant
-            return {"messages": prepend_system(json.dumps(context), self.system_prompt), "target": target, "source": source_label}
+            # Add a lightweight hint to the system so the student understands the context
+            hint = "[dataset:" + ("tools" if "glaive" in source_label else "code") + "]"
+            sys_text = f"{self.system_prompt}\n{hint}"
+            return {"messages": prepend_system(json.dumps(context), sys_text), "target": target, "source": source_label}
         df = pd.DataFrame(ds.map(conv))
         print(f"{source_label} ready: {len(df)} rows in {int(time.time()-t0)}s")
         return df
@@ -236,11 +290,34 @@ class Datsets:
         return hh_df
 
     def return_self_cog(self, num_rows):
+        # ERROR FIX: This dataset uses a 'messages' list, not flat columns.
         ds = load_dataset("modelscope/self-cognition", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("instruction","prompt"), assistant_keys=("output","response"), source_label="self-cognition")
-        if len(df) < num_rows:
+        
+        def conv(example):
+            # Extract from 'messages' list
+            msgs = example.get("messages", [])
+            target = ""
+            user_content = ""
+            
+            # Simple extraction: Last assistant is target, last user is context
+            if isinstance(msgs, list):
+                for m in reversed(msgs):
+                    if m.get('role') == 'assistant' and not target:
+                        target = m.get('content', '')
+                    if m.get('role') == 'user' and not user_content:
+                        user_content = m.get('content', '')
+            
+            user_content = inject_identity(user_content)
+            user_content = self._augment_user(user_content)
+            
+            # Rebuild standardized messages
+            context = [{"role":"user", "content": user_content}]
+            return {"messages": prepend_system(json.dumps(context), self.system_prompt), "target": target, "source": "self-cognition"}
+
+        df = pd.DataFrame(ds.map(conv))
+        if len(df) < num_rows and len(df) > 0:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
 
@@ -248,7 +325,13 @@ class Datsets:
         ds = load_dataset("open-thoughts/OpenThoughts-114k", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("prompt","instruction"), assistant_keys=("completion","response","output"), source_label="OpenThoughts-114k")
+        # FIX: Added 'question' to user_keys
+        df = self._map_pairwise_conv(
+            ds, 
+            user_keys=("system", "question", "prompt", "instruction"), 
+            assistant_keys=("response", "completion", "output"), 
+            source_label="OpenThoughts-114k"
+        )
         if len(df) < num_rows:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
@@ -257,8 +340,44 @@ class Datsets:
         ds = load_dataset("bespokelabs/Bespoke-Stratos-17k", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("prompt","instruction"), assistant_keys=("completion","response","output"), source_label="Bespoke-Stratos-17k")
-        if len(df) < num_rows:
+        # FIX: Added 'conversations' checking logic implicitly via robust keys
+        # If this dataset uses 'conversations' (list), _map_pairwise_conv might still fail unless updated.
+        # Assuming it uses standard keys for now, but adding 'messages' handling is safer.
+        # Ideally, check if it has 'conversations' column first. 
+        # For now, adding 'content' and 'query' just in case.
+
+        def conv(example):
+            # Check for 'messages' OR 'conversations'
+            msgs = example.get("messages", example.get("conversations", []))
+            
+            target = ""
+            user_content = ""
+            
+            # Extract content from list of dicts
+            if isinstance(msgs, list):
+                for m in reversed(msgs):
+                    role = m.get('role', '')
+                    content = m.get('content', '') or m.get('value', '') # sometimes key is 'value'
+                    
+                    if role == 'assistant' and not target:
+                        target = content
+                    if role == 'user' and not user_content:
+                        user_content = content
+            
+            # Fallback for flat columns if the list method failed (just in case)
+            if not user_content:
+                 user_content = example.get('prompt', example.get('instruction', example.get('query', '')))
+            if not target:
+                 target = example.get('completion', example.get('response', example.get('output', '')))
+
+            user_content = inject_identity(user_content)
+            user_content = self._augment_user(user_content)
+            
+            # Rebuild standardized messages
+            context = [{"role":"user", "content": user_content}]
+            return {"messages": prepend_system(json.dumps(context), self.system_prompt), "target": target, "source": "Bespoke-Stratos-17k"}
+        df = pd.DataFrame(ds.map(conv))
+        if len(df) < num_rows and len(df) > 0:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
 
@@ -266,7 +385,13 @@ class Datsets:
         ds = load_dataset("glaiveai/glaive-function-calling-v2", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("prompt","instruction"), assistant_keys=("response","output","completion"), source_label="glaive-function-calling-v2")
+        # FIX: Glaive uses 'chat' (user) and 'system' (assistant)
+        df = self._map_pairwise_conv(
+            ds, 
+            user_keys=("chat", "prompt", "instruction"), 
+            assistant_keys=("system", "response", "output", "completion"), 
+            source_label="glaive-function-calling-v2"
+        )
         if len(df) < num_rows:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
@@ -275,7 +400,12 @@ class Datsets:
         ds = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("instruction","prompt"), assistant_keys=("response","output","completion"), source_label="Magicoder-Evol-Instruct-110K")
+        df = self._map_pairwise_conv(
+            ds,
+            user_keys=("instruction","prompt"),
+            assistant_keys=("response","output","completion"),
+            source_label="Magicoder-Evol-Instruct-110K"
+        )
         if len(df) < num_rows:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
@@ -284,7 +414,12 @@ class Datsets:
         ds = load_dataset("BAAI/Infinity-Instruct", "7M_core", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("instruction","prompt"), assistant_keys=("response","output","completion"), source_label="Infinity-Instruct-7M_core")
+        df = self._map_pairwise_conv(
+            ds,
+            user_keys=("instruction","prompt"),
+            assistant_keys=("response","output","completion"),
+            source_label="Infinity-Instruct-7M_core"
+        )
         if len(df) < num_rows:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
@@ -293,10 +428,64 @@ class Datsets:
         ds = load_dataset("garage-bAInd/Open-Platypus", split="train")
         avail = len(ds)
         ds = ds.select(range(min(num_rows, avail)))
-        df = self._map_pairwise_conv(ds, user_keys=("instruction","prompt","question"), assistant_keys=("response","output","completion","answer"), source_label="Open-Platypus")
+        df = self._map_pairwise_conv(
+            ds,
+            user_keys=("instruction","prompt","question"),
+            assistant_keys=("response","output","completion","answer"),
+            source_label="Open-Platypus"
+        )
         if len(df) < num_rows:
             df = df.sample(n=num_rows, replace=True, random_state=42)
         return df
+
+    def return_sms(self, num_rows):
+        """Load SMS-style training data from TrainingData/training_data.csv and format for RLAIF.
+        Expects columns: messages (JSON string) and target (assistant visible reply).
+        - Ensures user messages include [DELTA:(..)] and <emotion>
+        - Prepends a system prompt
+        - Leaves target as-is (visible reply); thought insertion happens later upstream
+        """
+        tpath = os.path.join(os.getcwd(), "TrainingData", "training_data.csv")
+        if not os.path.isfile(tpath):
+            print(f"SMS training_data.csv not found: {tpath}")
+            return pd.DataFrame(columns=["messages","target","source"]) 
+
+        try:
+            df = pd.read_csv(tpath)
+        except Exception as e:
+            print(f"Failed to read training_data.csv: {e}")
+            return pd.DataFrame(columns=["messages","target","source"]) 
+
+        rows = []
+        take = min(num_rows, len(df))
+        df = df.head(take)
+        for _, r in df.iterrows():
+            msgs_raw = r.get("messages", "[]")
+            target = str(r.get("target", "") or "")
+            # Parse messages JSON
+            try:
+                msgs = json.loads(msgs_raw) if isinstance(msgs_raw, str) else msgs_raw
+            except Exception:
+                msgs = []
+            if not isinstance(msgs, list):
+                msgs = []
+            # Ensure user turns carry delta/emotion
+            for m in msgs:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    m["content"] = self._augment_user(m.get("content", ""))
+            # Prepend/refresh system prompt
+            msgs_json = prepend_system(json.dumps(msgs), self.system_prompt)
+            rows.append({
+                "messages": msgs_json,
+                "target": target,
+                "source": "sms"
+            })
+        df_out = pd.DataFrame(rows)
+        # If fewer than requested, upsample
+        if len(df_out) < num_rows and len(df_out) > 0:
+            df_out = df_out.sample(n=num_rows, replace=True, random_state=42)
+        print(f"sms ready (training_data.csv): {len(df_out)} rows")
+        return df_out
 
     def return_empathetic_dialogues(self, num_rows):
         ds = load_dataset("facebook/empathetic_dialogues", split="train", trust_remote_code=True)
@@ -327,9 +516,10 @@ class Datsets:
             "infinity_instruct": self.return_infinity(num_rows),
             "open_platypus": self.return_open_platypus(num_rows),
             "empathetic_dialogues": self.return_empathetic_dialogues(num_rows),
+            "sms": self.return_sms(num_rows),
         }
         if add_thoughts:
             for k, v in list(data.items()):
                 print(f"--- Generating thoughts for {k} ---")
-                data[k] = self._augment_df_with_model_think(v)
+                data[k] = self._augment_df_with_model_think(v, max_workers=25)
         return data
