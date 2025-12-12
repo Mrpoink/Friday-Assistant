@@ -14,7 +14,7 @@ from google.genai import types
 import os
 import time
 
-GEMINI_API_KEY = "AIzaSyCO1iuF6k9sJ7egnSoBG6RSqGKnRlTA-_E"  # Replace with your actual API key
+GEMINI_API_KEY = "GEMINI_API_KEY"  # Replace with your actual API key
 
 # === NEW: Gemini Teacher Class ===
 class GeminiThinker:
@@ -262,18 +262,19 @@ class EmotionEngine:
     
 class ThinkEngine:
     def __init__(self, model_name: str = "phi3.5:3.8b"):
-        # Use Ollama as the backing inference engine.
-        # Ensure the model is available in Ollama via `ollama pull`.
-        import os
-        import ollama
-        self._ollama = ollama
-        # Allow overriding model and VRAM-affecting options via env
-        self.model_name = os.getenv("FRIDAY_OLLAMA_MODEL", model_name)
-        self.num_ctx = int(os.getenv("FRIDAY_OLLAMA_NUM_CTX", "1024"))
-        self.default_num_predict = int(os.getenv("FRIDAY_OLLAMA_NUM_PREDICT", "512"))
-        self.temperature = float(os.getenv("FRIDAY_OLLAMA_TEMPERATURE", "0.7"))
-        # keep_alive=0 forces unload after each call to free VRAM
-        self.keep_alive = os.getenv("FRIDAY_OLLAMA_KEEP_ALIVE", "0")
+        pass
+        # # Use Ollama as the backing inference engine.
+        # # Ensure the model is available in Ollama via `ollama pull`.
+        # import os
+        # import ollama
+        # self._ollama = ollama
+        # # Allow overriding model and VRAM-affecting options via env
+        # self.model_name = os.getenv("FRIDAY_OLLAMA_MODEL", model_name)
+        # self.num_ctx = int(os.getenv("FRIDAY_OLLAMA_NUM_CTX", "1024"))
+        # self.default_num_predict = int(os.getenv("FRIDAY_OLLAMA_NUM_PREDICT", "512"))
+        # self.temperature = float(os.getenv("FRIDAY_OLLAMA_TEMPERATURE", "0.7"))
+        # # keep_alive=0 forces unload after each call to free VRAM
+        # self.keep_alive = os.getenv("FRIDAY_OLLAMA_KEEP_ALIVE", "0")
 
     def _chat(self, prompt: str, max_new_tokens: int = 512) -> str:
         system_text = (

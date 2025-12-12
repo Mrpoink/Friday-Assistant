@@ -9,6 +9,7 @@ import pandas as pd
 from datasets import load_dataset
 from ExtraTools import TimeTools, EmotionEngine
 from tqdm.auto import tqdm
+from transformers import AutoTokenizer
 
 DELTA_TAG_PATTERN = re.compile(r"\[DELTA:\s*\(([^)]*)\)\]", re.IGNORECASE)
 THINK_BLOCK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
@@ -162,6 +163,109 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return row
 
     return df.apply(_row_proc, axis=1)
+
+
+# ==== Tokenizer utilities and token-limit filtering ====
+def _load_tokenizer() -> AutoTokenizer:
+    tok_dir = os.path.join("Friday_Tokenizer")
+    if os.path.exists(tok_dir):
+        tokenizer = AutoTokenizer.from_pretrained(tok_dir)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-1.5B-Instruct")
+    tokenizer.add_special_tokens({
+        "additional_special_tokens": [
+            "<think>", "</think>", "<tool_call>", "</tool_call>", "[identity]",
+            "<|im_start|>", "<|im_end|>"
+        ]
+    })
+    tokenizer.model_max_length = 8192
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def _collect_row_special_tokens(messages_str: str) -> List[str]:
+    specials: List[str] = []
+    # Collect DELTA tags
+    for m in DELTA_TAG_PATTERN.finditer(messages_str or ""):
+        tag = m.group(0)
+        if tag not in specials:
+            specials.append(tag)
+    # Collect emotion tags heuristically (e.g., tokens like <emotion:...> or [EMOTION:...])
+    emotion_matches = re.findall(r"<(?:emotion|affect):[^>]+>|\[EMOTION:[^\]]+\]", messages_str or "", flags=re.IGNORECASE)
+    for em in emotion_matches:
+        if em not in specials:
+            specials.append(em)
+    return specials
+
+
+def _messages_to_text(tokenizer: AutoTokenizer, messages_json_str: str) -> str:
+    try:
+        msgs = json.loads(messages_json_str) if messages_json_str else []
+        if not isinstance(msgs, list):
+            msgs = []
+    except Exception:
+        msgs = []
+    # Ensure minimal system if missing
+    if not msgs or msgs[0].get("role") != "system":
+        sys_prompt = "You are Friday, an AI assistant created by Brandon Dean."
+        msgs = [{"role": "system", "content": sys_prompt}] + [m for m in msgs if isinstance(m, dict)]
+    try:
+        return tokenizer.apply_chat_template(msgs, tokenize=False)
+    except Exception:
+        # Fallback: concatenate contents
+        return "\n".join(str(m.get("content", "")) for m in msgs if isinstance(m, dict))
+
+
+def filter_by_token_limit(df: pd.DataFrame, tokenizer: AutoTokenizer, limit: int = 8192) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    keep_idxs: List[int] = []
+    # Pre-collect observed special tokens across df to add to tokenizer
+    observed_specials: List[str] = []
+    for i, row in df.iterrows():
+        msgs_str = str(row.get("messages", ""))
+        for tok in _collect_row_special_tokens(msgs_str):
+            if tok not in observed_specials:
+                observed_specials.append(tok)
+    if observed_specials:
+        tokenizer.add_special_tokens({"additional_special_tokens": observed_specials})
+
+    for i, row in df.iterrows():
+        msgs_str = str(row.get("messages", ""))
+        text = _messages_to_text(tokenizer, msgs_str)
+        try:
+            ids = tokenizer(text, return_attention_mask=False, add_special_tokens=False)["input_ids"]
+            length = len(ids)
+        except Exception:
+            length = 0
+        if length <= limit:
+            keep_idxs.append(i)
+    if keep_idxs:
+        return df.loc[keep_idxs].reset_index(drop=True)
+    return df.head(0)
+
+
+def verify_token_limit(df: pd.DataFrame, tokenizer: AutoTokenizer, limit: int = 8192) -> Tuple[pd.DataFrame, int]:
+    """Recompute token lengths and drop any rows still exceeding the limit.
+    Returns (filtered_df, dropped_count)."""
+    if df is None or df.empty:
+        return df, 0
+    keep_idxs: List[int] = []
+    for i, row in df.iterrows():
+        msgs_str = str(row.get("messages", ""))
+        text = _messages_to_text(tokenizer, msgs_str)
+        try:
+            ids = tokenizer(text, return_attention_mask=False, add_special_tokens=False)["input_ids"]
+            length = len(ids)
+        except Exception:
+            length = 0
+        if length <= limit:
+            keep_idxs.append(i)
+    dropped = len(df) - len(keep_idxs)
+    if keep_idxs:
+        return df.loc[keep_idxs].reset_index(drop=True), dropped
+    return df.head(0), len(df)
 
 
 # ==== Base dataset augmentation for OpenThoughts + Bespoke ====
@@ -336,9 +440,17 @@ def scan_and_fix(input_paths: List[str], output_dir: str, rows_limit: int = 0, i
         for name, df in base.items():
             out_file = os.path.join(output_dir, f"fixed_{name}.csv")
             try:
-                df.to_csv(out_file, index=False)
+                # Apply token-limit filtering before writing
+                tokenizer = _load_tokenizer()
+                before = len(df)
+                df_filtered = filter_by_token_limit(df, tokenizer, limit=8192)
+                # Final verification pass
+                df_verified, post_dropped = verify_token_limit(df_filtered, tokenizer, limit=8192)
+                after = len(df_verified)
+                dropped = before - after
+                df_filtered.to_csv(out_file, index=False)
                 written.append(out_file)
-                print(f"[Write] Base dataset written: {out_file} (rows={len(df)})")
+                print(f"[Write] Base dataset written: {out_file} (rows={after}, dropped>{dropped}, post-check>{post_dropped})")
             except Exception as e:
                 err_path = os.path.join(output_dir, f"error_{name}.txt")
                 with open(err_path, "w", encoding="utf-8") as ef:
@@ -367,11 +479,19 @@ def scan_and_fix(input_paths: List[str], output_dir: str, rows_limit: int = 0, i
                     if rows_limit and len(df) > rows_limit:
                         df = df.head(rows_limit)
                         print(f"[Scan] Row limit applied: {rows_limit} (original larger)")
+                    # Always process and filter regardless of row limit branch
                     fixed = process_dataframe(df)
+                    tokenizer = _load_tokenizer()
+                    before = len(fixed)
+                    fixed = filter_by_token_limit(fixed, tokenizer, limit=8192)
+                    # Final verification pass
+                    fixed, post_dropped = verify_token_limit(fixed, tokenizer, limit=8192)
+                    after = len(fixed)
+                    dropped = before - after
                     out_file = os.path.join(output_dir, f"fixed_{out_name}")
                     fixed.to_csv(out_file, index=False)
                     written.append(out_file)
-                    print(f"[Write] Fixed file written: {out_file} (rows={len(fixed)})")
+                    print(f"[Write] Fixed file written: {out_file} (rows={after}, dropped>{dropped}, post-check>{post_dropped})")
                 except Exception as e:
                     err_path = os.path.join(output_dir, f"error_{out_name}.txt")
                     with open(err_path, "w", encoding="utf-8") as ef:
@@ -391,10 +511,16 @@ def scan_and_fix(input_paths: List[str], output_dir: str, rows_limit: int = 0, i
                         df = df.head(rows_limit)
                         print(f"[Scan] Row limit applied: {rows_limit} (original larger)")
                     fixed = process_dataframe(df)
+                    tokenizer = _load_tokenizer()
+                    before = len(fixed)
+                    fixed = filter_by_token_limit(fixed, tokenizer, limit=8192)
+                    fixed, post_dropped = verify_token_limit(fixed, tokenizer, limit=8192)
+                    after = len(fixed)
+                    dropped = before - after
                     out_file = os.path.join(output_dir, f"fixed_{out_name}")
                     fixed.to_csv(out_file, index=False)
                     written.append(out_file)
-                    print(f"[Write] Fixed file written: {out_file} (rows={len(fixed)})")
+                    print(f"[Write] Fixed file written: {out_file} (rows={after}, dropped>{dropped}, post-check>{post_dropped})")
                 except Exception as e:
                     err_path = os.path.join(output_dir, f"error_{out_name}.txt")
                     with open(err_path, "w", encoding="utf-8") as ef:

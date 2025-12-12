@@ -183,6 +183,7 @@ def compute_metrics(eval_prediction):
     return metric.compute(predictions=predictions, references=labels)
 
 def find_lr(epoch_index):
+    #Maybe change this to 1e-4 as well
     new_lr = 5e-5 * (0.5 ** (epoch_index - 1)) # Epoch 1: 5e-5, Epoch 2: 2.5e-5, Epoch 3: 1.25e-5
     return new_lr
 
@@ -193,8 +194,8 @@ bnb_config = BitsAndBytesConfig(
 )
 
 lora_config = LoraConfig(
-    r=64,
-    lora_alpha=128,
+    r=64, #maybe change to 128
+    lora_alpha=128, #maybe change to 256
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM",
@@ -283,10 +284,10 @@ training_args = TrainingArguments(
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,
     num_train_epochs=1,
-    gradient_accumulation_steps=32,
+    gradient_accumulation_steps=32, #maybe increase to 48
     gradient_checkpointing=True,
     report_to=[],
-    learning_rate=5e-5,
+    learning_rate=5e-5, #maybe change to 1e-4
     lr_scheduler_type="cosine",
     fp16=False,
     bf16=True,
@@ -297,7 +298,7 @@ training_args = TrainingArguments(
     dataloader_num_workers=0 if is_windows else 2,
     optim="paged_adamw_8bit",
     warmup_ratio=0.05,
-    weight_decay=0.01,
+    weight_decay=0.01, #keep
     greater_is_better=False,
     group_by_length=False
 )
