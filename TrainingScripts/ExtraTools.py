@@ -14,7 +14,7 @@ from google.genai import types
 import os
 import time
 
-GEMINI_API_KEY = "GEMINI_API_KEY"  # Replace with your actual API key
+GEMINI_API_KEY = "AIzaSyCO1iuF6k9sJ7egnSoBG6RSqGKnRlTA-_E"  # Replace with your actual API key
 
 # === NEW: Gemini Teacher Class ===
 class GeminiThinker:
@@ -262,85 +262,85 @@ class EmotionEngine:
     
 class ThinkEngine:
     def __init__(self, model_name: str = "phi3.5:3.8b"):
-        # # Use Ollama as the backing inference engine.
-        # # Ensure the model is available in Ollama via `ollama pull`.
-        # import os
-        # import ollama
-        # self._ollama = ollama
-        # # Allow overriding model and VRAM-affecting options via env
-        # self.model_name = os.getenv("FRIDAY_OLLAMA_MODEL", model_name)
-        # self.num_ctx = int(os.getenv("FRIDAY_OLLAMA_NUM_CTX", "1024"))
-        # self.default_num_predict = int(os.getenv("FRIDAY_OLLAMA_NUM_PREDICT", "512"))
-        # self.temperature = float(os.getenv("FRIDAY_OLLAMA_TEMPERATURE", "0.7"))
-        # # keep_alive=0 forces unload after each call to free VRAM
-        # self.keep_alive = os.getenv("FRIDAY_OLLAMA_KEEP_ALIVE", "0")
+        # Use Ollama as the backing inference engine.
+        # Ensure the model is available in Ollama via `ollama pull`.
+        import os
+        import ollama
+        self._ollama = ollama
+        # Allow overriding model and VRAM-affecting options via env
+        self.model_name = os.getenv("FRIDAY_OLLAMA_MODEL", model_name)
+        self.num_ctx = int(os.getenv("FRIDAY_OLLAMA_NUM_CTX", "1024"))
+        self.default_num_predict = int(os.getenv("FRIDAY_OLLAMA_NUM_PREDICT", "512"))
+        self.temperature = float(os.getenv("FRIDAY_OLLAMA_TEMPERATURE", "0.7"))
+        # keep_alive=0 forces unload after each call to free VRAM
+        self.keep_alive = os.getenv("FRIDAY_OLLAMA_KEEP_ALIVE", "0")
 
-#     def _chat(self, prompt: str, max_new_tokens: int = 512) -> str:
-#         system_text = (
-#             """
-#         You are an expert AI creating a 'Thought Trace' for a smaller student model (Friday, who was developed by Brandon Dean).
+    def _chat(self, prompt: str, max_new_tokens: int = 512) -> str:
+        system_text = (
+            """
+        You are an expert AI creating a 'Thought Trace' for a smaller student model (Friday, who was developed by Brandon Dean).
 
-# INPUT CONTEXT:
-# The user message will contain metadata tags:
-# 1. [DELTA:...] -> How long the user waited (SHORT, MEDIUM, LONG, FOREVER).
-# 2. [emotion:...] -> The tone the user or model should currently have.
-# 3. TARGET RESPONSE -> The final answer the assistant actually gave.
+INPUT CONTEXT:
+The user message will contain metadata tags:
+1. [DELTA:...] -> How long the user waited (SHORT, MEDIUM, LONG, FOREVER).
+2. [emotion:...] -> The tone the user or model should currently have.
+3. TARGET RESPONSE -> The final answer the assistant actually gave.
 
-# YOUR TASK:
-# Generate a <think> block that acts as the internal monologue leading to the TARGET RESPONSE.
+YOUR TASK:
+Generate a <think> block that acts as the internal monologue leading to the TARGET RESPONSE.
 
-# RULES FOR THINKING:
-# - Analyze the [DELTA]. If it is LONG/FOREVER, the thought should reflect worry, guilt, or surprise. If SHORT, it's casual.
-# - Analyze the [emotion]. The thought must align with this mood.
-# - DO NOT generate the final response. ONLY generate the content inside the tags.
-# - Output format: <think> ... reasoning ... </think>
+RULES FOR THINKING:
+- Analyze the [DELTA]. If it is LONG/FOREVER, the thought should reflect worry, guilt, or surprise. If SHORT, it's casual.
+- Analyze the [emotion]. The thought must align with this mood.
+- DO NOT generate the final response. ONLY generate the content inside the tags.
+- Output format: <think> ... reasoning ... </think>
 
-# CONTEXTUAL REASONING STRATEGIES (Use the one that fits the input):
-# 1. IF THE INPUT IS LOGICAL OR FACTUAL (OpenThoughts/Enigmata):
-#    - Break the thought down into clear, atomic, reasoning steps (First Principles).
-#    - Ask "Why?" at least three times to dig deeper into the causality.
-#    - When defining terms, use this format: [Concept] --(is_a)--> [Description] --(has_property)--> [Function].
+CONTEXTUAL REASONING STRATEGIES (Use the one that fits the input):
+1. IF THE INPUT IS LOGICAL OR FACTUAL (OpenThoughts/Enigmata):
+   - Break the thought down into clear, atomic, reasoning steps (First Principles).
+   - Ask "Why?" at least three times to dig deeper into the causality.
+   - When defining terms, use this format: [Concept] --(is_a)--> [Description] --(has_property)--> [Function].
 
-# 2. IF THE INPUT IS SOCIAL OR CASUAL (SMS):
-#    - Focus on the *intent* and *relationship* dynamic.
-#    - Instead of defining terms, reflect on *why* the user feels this way.
-#    - Keep the internal monologue grounded in personality and memory, not dictionary definitions.
+2. IF THE INPUT IS SOCIAL OR CASUAL (SMS):
+   - Focus on the *intent* and *relationship* dynamic.
+   - Instead of defining terms, reflect on *why* the user feels this way.
+   - Keep the internal monologue grounded in personality and memory, not dictionary definitions.
 
-# TOOL USE LOGIC:
-# - If the TARGET RESPONSE implies knowledge not in the conversation (e.g., weather, news, specific facts), assume a tool call was made and successful.
-# - In the thought, explicitly decide to call the tool to verify this information.
-# - Format the intent as: <tool_call tool="TOOL_NAME">parameters</tool_call>
-# - Note: Do not hallucinate the tool's *output* in the thought; simply justify the *need* for the tool that leads to the final answer.
+TOOL USE LOGIC:
+- If the TARGET RESPONSE implies knowledge not in the conversation (e.g., weather, news, specific facts), assume a tool call was made and successful.
+- In the thought, explicitly decide to call the tool to verify this information.
+- Format the intent as: <tool_call tool="TOOL_NAME">parameters</tool_call>
+- Note: Do not hallucinate the tool's *output* in the thought; simply justify the *need* for the tool that leads to the final answer.
 
-# STYLE:
-# - NEVER apologize or mention being an AI model.
-# - If the Target Response is concise, explain *why* brevity was chosen.
-#         """
-#         )
-#         try:
-#             # Respect env-tuned limits for lower VRAM usage
-#             predict = min(int(max_new_tokens or 0) or self.default_num_predict, self.default_num_predict)
-#             data = self._ollama.chat(
-#                 model=self.model_name,
-#                 messages=[
-#                     {"role": "system", "content": system_text},
-#                     {"role": "user", "content": prompt or ""},
-#                 ],
-#                 options={
-#                     "num_predict": predict,
-#                     "num_ctx": self.num_ctx,
-#                     "temperature": self.temperature,
-#                 },
-#                 keep_alive=self.keep_alive,
-#             )
-#             content = data.get("message", {}).get("content", "")
-#             return str(content or "").strip()
-#         except Exception as e:
-#             # Return a minimal think block on failure
-#             return f"<think>Internal reasoning unavailable: {e}</think>"
+STYLE:
+- NEVER apologize or mention being an AI model.
+- If the Target Response is concise, explain *why* brevity was chosen.
+        """
+        )
+        try:
+            # Respect env-tuned limits for lower VRAM usage
+            predict = min(int(max_new_tokens or 0) or self.default_num_predict, self.default_num_predict)
+            data = self._ollama.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": prompt or ""},
+                ],
+                options={
+                    "num_predict": predict,
+                    "num_ctx": self.num_ctx,
+                    "temperature": self.temperature,
+                },
+                keep_alive=self.keep_alive,
+            )
+            content = data.get("message", {}).get("content", "")
+            return str(content or "").strip()
+        except Exception as e:
+            # Return a minimal think block on failure
+            return f"<think>Internal reasoning unavailable: {e}</think>"
 
-    # def generate_thought(self, prompt: str, max_new_tokens: int = 512) -> str:
-    #     return self._chat(prompt, max_new_tokens=max_new_tokens)
+    def generate_thought(self, prompt: str, max_new_tokens: int = 512) -> str:
+        return self._chat(prompt, max_new_tokens=max_new_tokens)
 
     def generate_thoughts(self, prompts, max_new_tokens: int = 512):
         if not isinstance(prompts, (list, tuple)):

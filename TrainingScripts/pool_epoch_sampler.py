@@ -56,7 +56,8 @@ def sample_pool_epoch(pools: dict[str, pd.DataFrame],
                       counts: dict[str, int],
                       static_sms: pd.DataFrame,
                       static_identity: pd.DataFrame,
-                      pool_key: str) -> pd.DataFrame:
+                      pool_key: str,
+                      epoch_index: int) -> pd.DataFrame:
     """Sample a single pool for one epoch, including static anchors if requested."""
     dfs = []
     # Include static anchors alongside dynamic pool to preserve distribution
@@ -68,7 +69,12 @@ def sample_pool_epoch(pools: dict[str, pd.DataFrame],
     n = counts.get(pool_key, 0)
     df_pool = pools.get(pool_key, pd.DataFrame(columns=['messages','target','source']))
     if len(df_pool) > 0 and n > 0:
-        dfs.append(sample_with_replacement(df_pool, n))
+        # Sliding window: rotate by pool size each epoch
+        L = len(df_pool)
+        offset = ((epoch_index - 1) * n) % max(1, L)
+        # Build indices with wrap-around
+        idxs = [(offset + i) % L for i in range(n)]
+        dfs.append(df_pool.iloc[idxs])
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=['messages','target','source'])
 
 
@@ -93,7 +99,7 @@ def build_pool_epochs(args):
 
         for pool_key in counts.keys():
             # Sample data for this pool
-            df = sample_pool_epoch(pools, counts, static_sms, static_identity, pool_key)
+            df = sample_pool_epoch(pools, counts, static_sms, static_identity, pool_key, epoch)
 
             # Optional Ollama augmentation per-pool, mirroring original faucet behavior
             if getattr(args, "ollama_thoughts", False) and len(df) > 0:

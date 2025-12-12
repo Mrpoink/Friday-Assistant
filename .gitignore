@@ -16,17 +16,39 @@ Thumbs.db
 *.swo
 .vscode/
 
+# Model checkpoints and weights (large files)
+checkpoint-*/
+prompt_classifier_Qwen/checkpoint-*/
+prompt_classifier_Qwen/runs/
+prompt_classifier_Smol/checkpoint-*/
+prompt_classifier_Smol/runs/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Optimizer / training artifacts
+*.log
+*.out
+training_logs_smol.txt
+scaler.pt
+optimizer.pt
+scheduler.pt
+rng_state.pth
+trainer_state.json
 
 # TensorBoard runs
 runs/
+
 # Data exports that can be regenerated
 Converted_CSVs/
 
 # If you want to keep training data CSVs under version control, comment these out
-TrainingData/*.csv
+# TrainingData/*.csv
 
 # Hugging Face cache (optional)
 ~/.cache/huggingface/
 Converted_CSVs/
 TrainingData/
-EFS$
