@@ -1,0 +1,55 @@
+=== Dataset Token Stats (Fixed only) ===
+Total datasets: 13 | Total rows: 272200
+Global Max Tokens: 139507 | Global Avg Tokens: 2700.98
+
+- fixed/fixed_Bespoke-Stratos-17k.csv
+  Rows: 16710 | Percent of pool: 6.14%
+  Max Tokens: 45082 | Avg Tokens: 5309.53
+
+- fixed/fixed_OpenThoughts-114k.csv
+  Rows: 46080 | Percent of pool: 16.93%
+  Max Tokens: 88301 | Avg Tokens: 7693.84
+
+- fixed/fixed__sample_identity_hh.csv
+  Rows: 10 | Percent of pool: 0.00%
+  Max Tokens: 1669 | Avg Tokens: 1044.30
+
+- fixed/fixed_create_airoboros.csv
+  Rows: 14400 | Percent of pool: 5.29%
+  Max Tokens: 11930 | Avg Tokens: 1290.12
+
+- fixed/fixed_create_dolphin.csv
+  Rows: 14400 | Percent of pool: 5.29%
+  Max Tokens: 11193 | Avg Tokens: 1293.93
+
+- fixed/fixed_empathetic.csv
+  Rows: 12000 | Percent of pool: 4.41%
+  Max Tokens: 86337 | Avg Tokens: 361.44
+
+- fixed/fixed_enigmata.csv
+  Rows: 12000 | Percent of pool: 4.41%
+  Max Tokens: 139507 | Avg Tokens: 7509.21
+
+- fixed/fixed_hh.csv
+  Rows: 2880 | Percent of pool: 1.06%
+  Max Tokens: 1266 | Avg Tokens: 332.84
+
+- fixed/fixed_identity_hh.csv
+  Rows: 17280 | Percent of pool: 6.35%
+  Max Tokens: 2690 | Avg Tokens: 604.28
+
+- fixed/fixed_intel_magicoder.csv
+  Rows: 34560 | Percent of pool: 12.70%
+  Max Tokens: 15102 | Avg Tokens: 1814.01
+
+- fixed/fixed_intel_openmix.csv
+  Rows: 46080 | Percent of pool: 16.93%
+  Max Tokens: 11313 | Avg Tokens: 789.12
+
+- fixed/fixed_sms.csv
+  Rows: 27000 | Percent of pool: 9.92%
+  Max Tokens: 3968 | Avg Tokens: 777.64
+
+- fixed/fixed_tools_glaive.csv
+  Rows: 28800 | Percent of pool: 10.58%
+  Max Tokens: 7535 | Avg Tokens: 1001.08
